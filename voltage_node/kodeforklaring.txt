@@ -4,21 +4,16 @@
 Node måler motorstrøm via en high-side shunt → analog forstærker → MCP3008‐ADC.
 Den sender resultatet som ampere på ROS 2-topic `/motor_current`.
 
-
-
 ----------------------------------------------------------------------------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------------------------------------------
 #!/usr/bin/env python3
 
-
 ----------------------------------------------------------------------------------------------------------------------------------------
 --------imports-------------------------------------------------------------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------------------------------------------
-
 import spidev                                    
 import rclpy`, `from rclpy.node import Node   
 from std_msgs.msg import Float32`                
-
 
 ----------------------------------------------------------------------------------------------------------------------------------------
 -------Konstanter-----------------------------------------------------------------------------------------------------------------------
@@ -33,17 +28,31 @@ SAMPLE_RATE = 50     # Hz – hvor ofte vi måler og publicerer
 --------Klassen-------------------------------------------------------------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------------------------------------------
 class VoltageNode(Node)
-
     def __init__(self):
         super().__init__("voltage_node")
 
+VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV
+- VoltageNode er en subklasse af rclpy.node.Node.
+- Node er basisklassen, der rummer al ROS-funktionalitet: publishers, subscribers, timers, parametre, QoS, osv.
+- Node.__init__() 
+- Det første argument er node_name.
+- Navnet bliver synligt i ROS Graph (ros2 node list) som /voltage_node.
+- Det bruges også som prefix for loggeroutput.
+- VoltageNode arver fra rclpy.node.Node. Med super().__init__("voltage_node") kører ROS 2’s egen konstruktør, som registrerer noden 
+  i RMW-laget, opretter logger, tidsstyring osv. Uden den linje kunne jeg ikke kalde create_publisher eller andre ROS-metoder.
 ----------------------------------------------------------------------------------------------------------------------------------------
---------   SPI     ---------------------------------------------------------------------------------------------------------------------
+------------- SPI----------------------------------------------------------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------------------------------------------
         self.spi = spidev.SpiDev()
-        self.spi.open(0, 0)              # bus 0, chip-select 0
+        self.spi.open(0, 0)
         self.spi.max_speed_hz = 1_000_000
-
+VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV
+- self.spi = spidev.SpiDev() - Opretter et SpiDev-objekt i Python.	
+Giver et “håndtag” til Linux-driveren /dev/spidev*, så man kan køre open(), xfer2(), osv
+- self.spi.open(0, 0) Åbner bus 0, chip-select 0 (/dev/spidev0.0). Første tal = SPI-controller-nummer (Pi5 har bus 0 & 1), 
+andet tal = hvilken CS-linje (CE0 eller CE1) der skal toggles når man kalder xfer2()
+- self.spi.max_speed_hz = 1_000_000	Sætter clock-hastighed til 1 MHz.	
+MCP3008 tåler op til ≈3,6 MHz - 3,3 V; 1 MHz er et sikkert valg og giver 50 målinger / s uden problemer.
 ----------------------------------------------------------------------------------------------------------------------------------------
 -----------Publisher og timer-----------------------------------------------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------------------------------------------
@@ -51,7 +60,16 @@ class VoltageNode(Node)
                                                "/motor_current", 10)
         self.create_timer(1.0 / SAMPLE_RATE, self.measure)
         self.get_logger().info(f"VoltageNode kører {SAMPLE_RATE} Hz")
-
+VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV
+- self.publisher - Opretter en ROS 2-publisher, der kan sende beskeder af typen Float32 på topic’en /motor_current
+- Float32 er en ROS-standardbesked, der bare indeholder ét flydende tal
+- "/motor_current" er navnet på topic, som andre noder kan abonnere på
+- 10 er længden på publisherens interne kø – hvis modtageren halter bagud, kan op til 10 beskeder vente.
+- SAMPLE_RATE bestemmer hvor ofte – i dette tilfælde 50 Hz ⇒ hvert 20 ms.
+- ROS2 timeren kører som et baggrunds-job og sikrer fast prøvetagning uden blokering af resten af noden.
+- “Timeren kalder measure() 50 gange i sekundet, så strømmen bliver opdateret og publiceret i realtime.”
+- self.get_logger() giver adgang til ROS 2’s indbyggede logger.
+- .info() skriver på INFO-niveau; beskeden ses kun én gang, når noden initialiseres.
 ----------------------------------------------------------------------------------------------------------------------------------------
 -------------Læsning af raw ADC---------------------------------------------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------------------------------------------
@@ -61,6 +79,57 @@ class VoltageNode(Node)
         resp  = self.spi.xfer2(frame)
         raw   = ((resp[1] & 0x03) << 8) | resp[2]  # 10-bit tal
         return raw
+VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV
+- def _read_adc_raw(self) -> int: 
+En “privat” hjælpefunktion, der henter ét rå 10-bit måleresultat fra MCP3008 ADC’en og returnerer det som et heltal (0–1023).
+frame = [1, (8 + ADC_CHANNEL) << 4, 0] - 1: Første byte – start-bit, 8 + ADC_CHANNEL) << 4: 8 (0b1000) sætter single-ended-mode-bit (bit 7) til 1.
+ADC_CHANNEL (0–7) lægges til – sætter hvilken af de 8 kanaler, som skal læses. << 4 flytter hele “pakken” op på bit 7-4, som MCP3008 kræver. 0: Dummy-byte
+
+
+- resp  = self.spi.xfer2(frame)
+Sender de tre bytes fra frame til MCP3008 og får tre svarbytes tilbage – alt sammen i én transaktion med chip-select lav hele vejen.
+resp bliver en Python-liste med tre heltal, hver 0–255.
+
+- raw   = ((resp[1] & 0x03) << 8) | resp[2]
+MCP3008’s 10-bit måleresultat ud af de tre modtagne bytes:
+resp[1] & 0x03: Masker alt undtagen bit 0–1 (de to mest betydningsfulde databit, d9–d8).
+<< 8: Flytter d9-d8 til deres rigtige position i et 10-bit heltal (bit 9–8).
+| resp[2]: Bitvis “eller” – tilføjer de sidste 8 databit (d7–d0) fra byte 3. Resultat: raw = samlet 10-bit tal, 0–1023.
+
+MCP3008 har målt en spænding, som digitaliseres til 10-bit:
+d9 d8 d7 d6 d5 d4 d3 d2 d1 d0
+ 1  0  1  1  1  0  1  0  0  1
+
+1×2(9) + 0×2(8) + 1×2(7) + 1×2(6) + 1×2(5) + 0×2(4) + 1×2(3) + 0×2(2) + 0×2(1) + 1×2(0)=
+ 512   +   0    +  128   +   64   +   32   +   0    +   8    +   0    +    0   +    1  = 745
+
+resp[1] & 0x03 giver d9 d8.
+Masker ALT UNDTAGEN de nederste to bits i resp[1].
+Disse to bits er:
+d9 mest betydningsfulde databit
+d8
+
+resp[2]
+Indeholder ALLE otte laveste bits
+d7, d6, d5, d4, d3, d2, d1, d0
+
+<< 8 → skubber d9-d8 op på plads i bit 9-8 i resultatet.
+| resp[2] → føjer d7-d0 til de laveste 8 bits i resultatet.
+
+
+& Bitvis AND – sammenligner bit for bit. Kun hvor begge er 1, får resultatet 1.
+0x03	Det er det hexadecimale tal 3 (binært 0000 0011). behold kun de to laveste bits, sæt resten til 0.
+
+d9 d8  d7 d6 d5 d4 d3 d2 d1 d0
+ 1  0   1  1  1  0  1  0  0  1   (745)
+
+[resp[1] & 0x03] = 0b10   (d9=1, d8=0)
+0b10 << 8      = 0b1000000000 (512)
+0b1000000000 | 0b10111001 = 0b1011101001 = 745
+
+se figur 6.1: https://cdn-shop.adafruit.com/datasheets/MCP3008.pdf
+CS sat til low
+
 
 ----------------------------------------------------------------------------------------------------------------------------------------
 ----------Måling, konvertering og publisering-------------------------------------------------------------------------------------------
